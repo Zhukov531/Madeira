@@ -1,0 +1,198 @@
+name: build-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/**']
+
+permissions:
+  contents: read
+
+jobs:
+  toolchains:
+    name: toolchains (mingw / gnutls / freetype)
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+      - uses: actions/cache@v4
+        with:
+          path: toolchains/llvm-mingw-20260421-ucrt-macos-universal
+          key: mingw-v1
+      - uses: actions/cache@v4
+        with:
+          path: toolchains/gnutls-ios
+          key: gnutls-v1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            research/freetype
+            build/freetype-ios/build
+          key: freetype-v1
+      - name: Build toolchains
+        shell: bash
+        run: bash .github/ci/run.sh 01-toolchains.sh
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.github/ci
+
+  wine-host:
+    name: wine-host (build-macos headers/tools)
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Install homebrew deps (gnutls, pkg-config, bison, flex)
+        shell: bash
+        run: brew install gnutls pkg-config bison flex
+      - uses: actions/cache@v4
+        with:
+          path: toolchains/llvm-mingw-20260421-ucrt-macos-universal
+          key: mingw-v1
+      - uses: actions/cache@v4
+        with:
+          path: wine/build-macos
+          key: winehost-v6
+      - uses: actions/cache@v4
+        with:
+          path: wine/build-arm64ec
+          key: winehost-arm64ec-v6
+      - name: Build wine host tree
+        shell: bash
+        run: bash .github/ci/run.sh 02-wine-host.sh
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.github/ci
+
+  fex:
+    name: fex (iOS static libs)
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Install homebrew deps (ninja, cmake)
+        shell: bash
+        run: brew install ninja cmake
+      - uses: actions/cache@v4
+        with:
+          path: FEX/build-ios
+          key: fex-v3
+      - name: Build FEX for iOS
+        shell: bash
+        run: bash .github/ci/run.sh 03-fex.sh
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.github/ci
+
+  llvm-ios:
+    name: llvm-ios (LLVM 15 iOS static libs)
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Install homebrew deps (ninja, cmake)
+        shell: bash
+        run: brew install ninja cmake
+      - uses: actions/cache@v4
+        with:
+          path: |
+            toolchains/llvm-ios-build
+            toolchains/llvm-host-build
+          key: llvmios-v4
+      - name: Build LLVM for iOS
+        shell: bash
+        run: bash .github/ci/run.sh 04-llvm-ios.sh
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.github/ci
+
+  unixlibs:
+    name: unixlibs (ntdll / win32u / wineserver / dxmt)
+    runs-on: macos-15
+    needs: [toolchains, wine-host, llvm-ios]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Install homebrew deps (llvm for llvm-objcopy)
+        shell: bash
+        run: brew install llvm
+      - uses: actions/cache@v4
+        with:
+          path: toolchains/gnutls-ios
+          key: gnutls-v1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            research/freetype
+            build/freetype-ios/build
+          key: freetype-v1
+      - uses: actions/cache@v4
+        with:
+          path: wine/build-macos
+          key: winehost-v6
+      - uses: actions/cache@v4
+        with:
+          path: wine/build-arm64ec
+          key: winehost-arm64ec-v6
+      - uses: actions/cache@v4
+        with:
+          path: |
+            toolchains/llvm-ios-build
+            toolchains/llvm-host-build
+          key: llvmios-v4
+      - name: Build unix libraries
+        shell: bash
+        run: bash .github/ci/run.sh 05-unixlibs.sh
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.github/ci
+      - name: Upload unixlibs artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: unixlibs
+          path: |
+            app/Madeira/libntdll_unix.a
+            app/Madeira/libwin32u_unix.a
+            app/Madeira/libwineserver.a
+            app/Madeira/libdxmt_combined.a
+          retention-days: 3
+
+  ipa:
+    name: ipa (app + release)
+    runs-on: macos-15
+    needs: [unixlibs, fex]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+      - uses: actions/cache@v4
+        with:
+          path: FEX/build-ios
+          key: fex-v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: unixlibs
+          path: app/Madeira
+      - name: Build app
+        shell: bash
+        run: bash .github/ci/run.sh 06-ipa.sh
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.github/ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-ipa
+          path: Madeira.ipa
+          retention-days: 7
